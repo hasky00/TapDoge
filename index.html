@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Tap Dodge</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin:0; height:100%; background:#0b0f14; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #wrap { height:100%; display:flex; align-items:center; justify-content:center; }
+    canvas { width:min(100vw, 520px); height:min(100vh, 920px); background: radial-gradient(1200px 900px at 50% 30%, #121a25, #070a0f); border-radius:18px; box-shadow: 0 20px 60px rgba(0,0,0,.55); touch-action:none; }
+    .hud {
+      position:fixed; left:0; right:0; top:0;
+      display:flex; justify-content:space-between; align-items:center;
+      padding: 14px 16px; pointer-events:none;
+      font-weight:700; letter-spacing:.2px;
+    }
+    .pill { pointer-events:none; padding:8px 12px; border-radius:999px; background: rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.08); }
+    .center {
+      position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+      text-align:center; padding:20px;
+    }
+    #overlay {
+      background: linear-gradient(rgba(0,0,0,.35), rgba(0,0,0,.65));
+      color:#eaf2ff;
+    }
+    #overlay .card{
+      max-width: 560px;
+      padding: 18px 18px 14px;
+      border-radius: 18px;
+      background: rgba(10,14,20,.72);
+      border:1px solid rgba(255,255,255,.10);
+      box-shadow: 0 24px 70px rgba(0,0,0,.55);
+    }
+    #overlay h1 { margin: 4px 0 6px; font-size: 26px; }
+    #overlay p { margin: 6px 0; opacity:.9; line-height:1.35; }
+    #btn {
+      margin-top: 12px;
+      display:inline-block;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: #2a6bff;
+      color:white;
+      font-weight:800;
+      text-decoration:none;
+      pointer-events:auto;
+      user-select:none;
+    }
+    #btn:active { transform: translateY(1px); }
+    .tiny { margin-top:10px; font-size: 12px; opacity:.7; }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <div class="pill">Score: <span id="score">0</span></div>
+    <div class="pill">Best: <span id="best">0</span></div>
+  </div>
+
+  <div id="wrap"><canvas id="c" width="520" height="920"></canvas></div>
+
+  <div id="overlay" class="center">
+    <div class="card">
+      <h1>Tap Dodge</h1>
+      <p>Tap left/right (or drag) to move.</p>
+      <p>Avoid the falling blocks. Survive = score.</p>
+      <a id="btn" href="#">Start</a>
+      <div class="tiny">Tip: rotate your phone if you want a different feel.</div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const scoreEl = document.getElementById('score');
+  const bestEl  = document.getElementById('best');
+  const overlay = document.getElementById('overlay');
+  const btn = document.getElementById('btn');
+
+  // Crisp rendering while keeping CSS-scaled canvas
+  const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  function resize() {
+    const w = 520, h = 920;
+    canvas.width = Math.floor(w * DPR);
+    canvas.height = Math.floor(h * DPR);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const W = 520, H = 920;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const rnd = (a,b) => a + Math.random()*(b-a);
+
+  const storageKey = 'tap_dodge_best_v1';
+  let best = +(localStorage.getItem(storageKey) || 0);
+  bestEl.textContent = best.toString();
+
+  let running = false;
+  let lastT = 0;
+
+  const player = { x: W/2, y: H-120, r: 18, vx: 0 };
+  const blocks = [];
+  let score = 0;
+  let difficulty = 1;
+  let spawnTimer = 0;
+
+  function reset() {
+    blocks.length = 0;
+    score = 0;
+    difficulty = 1;
+    spawnTimer = 0;
+    player.x = W/2;
+    player.vx = 0;
+    scoreEl.textContent = '0';
+  }
+
+  function spawnBlock() {
+    const size = rnd(26, 60);
+    const x = rnd(size/2 + 10, W - size/2 - 10);
+    const speed = rnd(220, 360) * (0.7 + difficulty*0.12);
+    blocks.push({ x, y: -size, s: size, vy: speed });
+  }
+
+  function circleRectCollide(cx, cy, cr, rx, ry, rw, rh) {
+    const nx = clamp(cx, rx, rx+rw);
+    const ny = clamp(cy, ry, ry+rh);
+    const dx = cx - nx, dy = cy - ny;
+    return dx*dx + dy*dy <= cr*cr;
+  }
+
+  function endGame() {
+    running = false;
+    best = Math.max(best, Math.floor(score));
+    localStorage.setItem(storageKey, String(best));
+    bestEl.textContent = String(best);
+
+    overlay.querySelector('h1').textContent = 'Game Over';
+    overlay.querySelector('p').innerHTML = `Score: <b>${Math.floor(score)}</b> &nbsp;·&nbsp; Best: <b>${best}</b>`;
+    overlay.querySelectorAll('p')[1].textContent = 'Tap Start to try again.';
+    btn.textContent = 'Start';
+    overlay.style.display = 'flex';
+  }
+
+  function update(dt) {
+    // Controls feel: quick & simple
+    player.x += player.vx * dt;
+    player.x = clamp(player.x, player.r+10, W - player.r-10);
+    player.vx *= Math.pow(0.0008, dt); // friction
+
+    // Difficulty ramps smoothly
+    score += dt * 10;
+    difficulty = 1 + score / 300;
+
+    // Spawn cadence
+    spawnTimer -= dt;
+    const interval = Math.max(0.18, 0.55 - difficulty*0.06);
+    if (spawnTimer <= 0) {
+      spawnBlock();
+      if (Math.random() < 0.35) spawnBlock();
+      spawnTimer = interval;
+    }
+
+    // Move blocks + collisions
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      b.y += b.vy * dt;
+      if (b.y - b.s > H + 80) blocks.splice(i, 1);
+      else {
+        const rx = b.x - b.s/2, ry = b.y - b.s/2;
+        if (circleRectCollide(player.x, player.y, player.r, rx, ry, b.s, b.s)) {
+          endGame();
+          return;
+        }
+      }
+    }
+    scoreEl.textContent = String(Math.floor(score));
+  }
+
+  function draw() {
+    // background
+    ctx.fillStyle = '#070a0f';
+    ctx.fillRect(0,0,W,H);
+
+    // subtle grid
+    ctx.globalAlpha = 0.12;
+    ctx.strokeStyle = '#9fb4ff';
+    ctx.lineWidth = 1;
+    for (let y=40; y<H; y+=80) {
+      ctx.beginPath();
+      ctx.moveTo(0,y);
+      ctx.lineTo(W,y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // blocks
+    for (const b of blocks) {
+      const rx = b.x - b.s/2, ry = b.y - b.s/2;
+      ctx.fillStyle = 'rgba(255,255,255,.09)';
+      ctx.fillRect(rx, ry, b.s, b.s);
+      ctx.strokeStyle = 'rgba(255,255,255,.16)';
+      ctx.strokeRect(rx, ry, b.s, b.s);
+    }
+
+    // player
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+    ctx.fillStyle = '#2a6bff';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.25)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // tiny instructions
+    ctx.fillStyle = 'rgba(255,255,255,.55)';
+    ctx.font = '14px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillText('Tap left/right or drag to move', 16, H - 18);
+  }
+
+  function loop(t) {
+    if (!running) return;
+    const now = t / 1000;
+    const dt = Math.min(0.033, Math.max(0, now - lastT));
+    lastT = now;
+
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // Input: tap/drag anywhere on canvas
+  let pointerDown = false;
+  let lastX = null;
+
+  function setByX(x) {
+    // Simple: move toward finger
+    const target = clamp(x, 0, W);
+    const dx = target - player.x;
+    player.vx = dx * 8; // proportional controller
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    pointerDown = true;
+    canvas.setPointerCapture(e.pointerId);
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (W / rect.width);
+    lastX = x;
+    setByX(x);
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointerDown) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (W / rect.width);
+    lastX = x;
+    setByX(x);
+  });
+
+  canvas.addEventListener('pointerup', () => { pointerDown = false; lastX = null; });
+
+  // Also allow quick taps on left/right halves
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (W / rect.width);
+    player.vx += (x < W/2 ? -420 : 420);
+  }, { passive: true });
+
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    overlay.style.display = 'none';
+    overlay.querySelector('h1').textContent = 'Tap Dodge';
+    reset();
+    running = true;
+    lastT = performance.now()/1000;
+    requestAnimationFrame(loop);
+  });
+
+  // First frame
+  draw();
+})();
+</script>
+</body>
+</html>
